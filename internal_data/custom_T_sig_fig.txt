@@ -1,0 +1,78 @@
+Component	Gene	Alt_name
+CD8 T	CD8A	
+CD8 T	CD8B	
+CD4 T	IL7R	
+CD4 T	CD4	
+Treg	FOXP3	
+Treg	IL2RA	CD25
+Treg	IKZF2	
+Treg	IKZF4	
+Treg	SAT1	
+Treg	TNFRSF4	
+Treg	TNFRSF18		
+Treg	IL10RA	
+Treg	CCR8	
+Treg	CTLA4	
+Tfh	TOX2	
+Tfh	NR3C1	
+Tfh	CXCL13	
+Tfh	ITM2A	
+Tfh	CXCR5	
+Tfh	BTLA	
+Tfh	CD200	
+Tfh	CD40LG	
+Activated/Effector	GNLY	
+Activated/Effector	PRF1	
+Activated/Effector	CX3CR1	
+Activated/Effector	EOMES	
+Activated/Effector	CTSW	
+Activated/Effector	GZMH	
+Activated/Effector	XCL2	
+Activated/Effector	GZMK	
+Activated/Effector	CCL5	
+Activated/Effector	GZMA	
+Activated/Effector	KLRG1	
+Activated/Effector	CXCR4	
+Activated/Effector	CXCR3	
+Activated/Effector	ABI3	
+Activated/Effector	CCR5	
+Activated/Effector	CCL4	
+Activated/Effector	CCL3		
+Activated/Effector	IL26	
+Activated/Effector	IL13		
+Activated/Effector	IFNG	
+Activated/Effector	GZMB	
+Activated/Effector	STAT1	
+Activated/Effector	TNF	
+Naive	LEF1	
+Naive	TCF7	
+Naive	CCR7	
+Naive	SELL	CD62L
+Naive	MAL	
+Naive	TXK	
+Naive	S1PR1	
+Naive	SATB1	
+Naive	PASK	
+Naive	AQP3	
+Naive	TRAT1	
+Memory	JUN	
+Memory	FOS	
+Memory	KLF6	
+Memory	FOSB	
+Memory	SLAMF6	
+Memory	CD44			
+Proliferating	HMGB2	
+Proliferating	TUBB	
+Proliferating	TUBA1B	
+Proliferating	H2AFZ	
+Proliferating	CKS1B	
+Proliferating	STMN1	
+Proliferating	CCNA2	
+Proliferating	MKI67	
+IFN-signaling	IRF7	
+IFN-signaling	MX1	
+IFN-signaling	IFI6	
+IFN-signaling	OAS1	
+IFN-signaling	DPP4	CD26
+IFN-signaling	IFIT1	
+IFN-signaling	IFIT2	
