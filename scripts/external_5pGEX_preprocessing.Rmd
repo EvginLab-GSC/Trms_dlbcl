@@ -1,0 +1,191 @@
+---
+title: "5 Prime TCR Data pre-processing"
+author: "Gillian Savage"
+output: html_document
+---
+
+```{r options, include=FALSE, warning = FALSE}
+
+library(knitr)
+opts_chunk$set(echo=TRUE, tidy=FALSE, include=TRUE, message=FALSE,
+               dpi = 100, cache = FALSE, warning = FALSE)
+
+```
+
+# Load packages and functions
+```{r Load packages and functions}
+
+library(Seurat) #use version 4.4
+library(tidyverse)
+library(readxl)
+
+mutate <- dplyr::mutate
+filter <- dplyr::filter
+count <- dplyr::count
+summarise <- dplyr::summarise
+rename <- dplyr::rename
+select <- dplyr::select
+options(dplyr.summarise.inform=FALSE)
+
+mytheme <- 
+  theme_bw()+
+  theme(legend.position = "none",
+        plot.title = element_text(hjust = 0.5),
+        panel.grid = element_blank())
+  
+```
+
+# Read data
+First process 5'GEX data obtained from the European Genome Archive ([EGAD50000000497](https://ega-archive.org/datasets/EGAD50000000497))
+
+Load processed and integrated 3' cell data in seurat file generated in external_3pCITEseq_TcellAnalysis.Rmd
+```{r read data}
+
+Combined_T <- readRDS("~/trm_dlbcl/external_data/Tcells_Integrated.rds") 
+
+#remove singeltons
+Combined_T <- subset(Combined_T, idents = c(0:16))
+Combined_T$IdentI <- Idents(Combined_T)
+```
+
+# Read and Process 5' scRNA data
+
+Function for standard Seurat processing pipeline
+```{r}
+# generate function to run standard Seurat processing pipeline
+SeuratProc_T <- 
+  function(sobj, verbose=FALSE, dims.clustering=NULL, resolution.clustering=NULL, dims.umap=NULL) {
+    
+    # Remove 
+    sobj <- DietSeurat(sobj)
+    DefaultAssay(sobj) <- "RNA"
+    
+    # Filter data set based on RNA
+    sobj <- FindVariableFeatures(sobj, selection.method = "vst", nfeatures = 2000, verbose=verbose)
+    
+    # Scale data (RNA and ADT)
+    sobj <- ScaleData(sobj, features = rownames(sobj), verbose=verbose)
+    
+    # Assess cell cycle
+    sobj <- CellCycleScoring(sobj, s.features = cc.genes$s.genes, g2m.features = cc.genes$g2m.genes, set.ident = TRUE)
+    sobj <- ScaleData(sobj, vars.to.regress = c("S.Score", "G2M.Score", "percent.mt"), verbose=verbose)
+    
+    # Run PCA
+    sobj <- RunPCA(sobj, features = VariableFeatures(sobj), nfeatures.print=5, ndims.print=1:2,
+                   reduction.name = "pcaRNA", reduction.key = "pcaRNA_")
+    
+    # Run clustering based on transcriptome
+    sobj <- FindNeighbors(sobj, dims = dims.clustering, verbose=verbose, reduction = "pcaRNA")
+    sobj <- FindClusters(sobj, resolution = resolution.clustering, verbose=verbose)
+    
+    # Run UMAP based on transcriptome
+    sobj <- RunUMAP(sobj, dims = dims.umap, verbose=verbose, reduction.key = "umapRNA_",
+                    reduction.name = "umapRNA", reduction = "pcaRNA")
+    
+    return(sobj)
+    
+  }
+```
+
+Load the 5'GEX data and process using Seurat processing pipeline function
+
+```{r Read and Process}
+
+files <- list.files(path = "~/citeseq_lymphoma/counts", pattern = "_5prime_GEX_counts.txt", full.names = T)
+names(files) <- strsplit(files, split = "_") %>% sapply("[[", 2) %>% strsplit(split = "/") %>% sapply("[[", 3)
+
+sobjs_T <- lapply(1:length(files), function(x) {
+  
+  # Read count tables
+  rna <- read.delim(files[x], sep = "\t", row.names = 1)
+  
+  # Create Seurat Object
+  sobj <- CreateSeuratObject(counts = rna)
+
+  # Add Percentage of mitochondrial genes and PatientID
+  sobj[["percent.mt"]] <- PercentageFeatureSet(sobj, pattern = "^MT-")
+  sobj$subject_id <- names(files)[x]
+  
+  # Normalize data
+  sobj <- NormalizeData(sobj, normalization.method = "LogNormalize", scale.factor = 10000)
+  
+  # Run Seurat Processing
+  sobj <- SeuratProc_T(sobj, verbose=FALSE, 
+                       dims.clustering=1:14, 
+                       resolution.clustering = 0.4, 
+                       dims.umap=1:13)
+  
+  return(sobj)
+  
+  })
+
+names(sobjs_T) <- names(files) 
+
+```
+
+Integrate datasets together into a merged seurat file
+```{r}
+# Merge objects
+for(i in 1:length(sobjs_T)) {
+  if(i==1){
+    Combined_T.5p <- merge(sobjs_T[[1]], sobjs_T[[2]])
+  }
+  if(i>2){
+    Combined_T.5p <- merge(Combined_T.5p, sobjs_T[[i]])
+  }
+}
+
+
+DefaultAssay(Combined_T.5p) <- "RNA"
+
+#run dimensionality reduction and clustering
+Combined_T.5p <- ScaleData(Combined_T.5p) 
+Combined_T.5p <- FindVariableFeatures(Combined_T.5p, selection.method = "vst", nfeatures = 2000, verbose=verbose)
+Combined_T.5p <- RunPCA(Combined_T.5p, 
+                     reduction.name = "pcaRNA", reduction.key = "pcaRNA_")
+
+Combined_T.5p <- RunUMAP(Combined_T.5p, dims = 1:20, reduction.key = "umapRNA_",
+                      reduction.name = "umapRNA", reduction = "pcaRNA")
+
+Combined_T.5p <- FindNeighbors(Combined_T.5p, reduction = "pcaRNA", dims = 1:20)
+Combined_T.5p <- FindClusters(Combined_T.5p, resolution = 0.6)
+
+```
+
+
+Now map cells to correct clusters generated and used in external_3pCITEseq_TcellAnalysis.Rmd 
+```{r}
+anchors <- FindTransferAnchors(reference = Combined_T, query = Combined_T.5p, reference.reduction = "pcaRNA")
+
+sobjs_T_mapped <- MapQuery(anchorset = anchors, reference = Combined_T, 
+                     query = Combined_T.5p,
+                     refdata = list(celltype = "IdentI"),
+                     reference.reduction = "pcaRNA", reduction.model="wnn.umap")
+```
+
+```{r}
+
+sobjs_T_mapped[['ref.umap']]  <- RunUMAP(object = sobjs_T_mapped,  reduction.model = Combined_T[[ "wnn.umap" ]], nn.name = "query_ref.nn", return.model = TRUE)
+
+#Combined_T <- RunUMAP(Combined_T, nn.name = "weighted.nn", reduction.name = "wnn.umap", 
+                     # reduction.key = "wnnUMAP_", return.model = TRUE)
+```
+
+```{r}
+DimPlot(object = sobjs_T_mapped, reduction = "umapRNA", group.by = "predicted.celltype", label = TRUE, label.size = 3, repel = TRUE) + NoLegend()
+```
+
+
+# Save object
+```{r save, eval=FALSE}
+
+saveRDS(sobjs_T_mapped, file = "~/trm_dlbcl/external_data/SeuratObjects_T_5prime.rds")
+
+```
+
+# Session Info
+```{r session info}
+
+sessionInfo()
+
+```

@@ -1,0 +1,737 @@
+---
+title: "Internal scRNAseq Preprocessing & Integration"
+author: "Gillian Savage"
+date: "1/6/2025"
+output: html_document
+---
+
+Load Libraries
+```{r}
+#Load Libraries
+
+library(Seurat)
+library(patchwork)
+library(reshape2)
+library(RColorBrewer)
+library(dplyr)
+
+require(SingleR)
+require(SingleCellExperiment)
+require(celldex)
+```
+
+## Load Data and generate Seurat Object
+
+Have DLBCL or HGL samples and rLN samples that have been processed by CellRanger to generate counts matrices. Count matrices are loaded individually before being combined. Counts files are organized by patient sample, with each having its own directory.
+
+```{r}
+setwd("~/trms_dlbcl")
+#load all counts matrix outputs from Cellranger
+RLN02 <- Read10X(data.dir = "./counts_files/RLN02/")
+RLN03 <- Read10X(data.dir = "./counts_files/RLN03/")
+RLN04 <- Read10X(data.dir = "./counts_files/RLN04/")
+RLN05 <- Read10X(data.dir = "./counts_files/RLN05/")
+CCS0025 <- Read10X(data.dir = "./counts_files/CCS0025/")
+GE0539 <- Read10X(data.dir = "./counts_files/GE0539/")
+DLC0087 <- Read10X(data.dir = "./counts_files/DLC0087/")
+DLC0341 <- Read10X(data.dir = "./counts_files/DLC0341/")
+GE0287 <- Read10X(data.dir = "./counts_files/GE0287/")
+DLC0169 <- Read10X(data.dir = "./counts_files/DLC0169/")
+CLC00277 <- Read10X(data.dir = "./counts_files/CLC00277/")
+GE0505 <- Read10X(data.dir = "./counts_files/GE0505/")
+CLC00275 <- Read10X(data.dir = "./counts_files/CLC00275/")
+CCS0099 <- Read10X(data.dir = "./counts_files/CCS0099/")
+CCS0277 <- Read10X(data.dir = "./counts_files/CCS0277/")
+CCS2010 <- Read10X(data.dir = "./counts_files/CCS2010/")
+
+```
+
+Each count matrix is then converted into a seurat object
+
+```{r}
+#create seurat objects for each
+RLN02_seur <- CreateSeuratObject(RLN02, project = "RLN02")
+RLN03_seur <- CreateSeuratObject(RLN03, project = "RLN03")
+RLN04_seur <- CreateSeuratObject(RLN04, project = "RLN04")
+RLN05_seur <- CreateSeuratObject(RLN05, project = "RLN05")
+CCS0025_seur <- CreateSeuratObject(CCS0025, project = "CCS0025")
+GE0539_seur <- CreateSeuratObject(GE0539, project = "GE0539")
+DLC0087_seur <- CreateSeuratObject(DLC0087, project = "DLC0087")
+DLC0341_seur <- CreateSeuratObject(DLC0341, project = "DLC0341")
+GE0287_seur <- CreateSeuratObject(GE0287, project = "GE0287")
+DLC0169_seur <- CreateSeuratObject(DLC0169, project = "DLC0169")
+CLC00277_seur <- CreateSeuratObject(CLC00277, project = "CLC00277")
+GE0505_seur <- CreateSeuratObject(GE0505, project = "GE0505")
+CLC00275_seur <- CreateSeuratObject(CLC00275, project = "CLC00275")
+CCS0099_seur <- CreateSeuratObject(CCS0099, project = "CCS0099")
+CCS0277_seur <- CreateSeuratObject(CCS0277, project = "CCS0277")
+CCS2010_seur <- CreateSeuratObject(CCS2010, project = "CCS2010")
+
+
+#remove matrices to save space since they are no longer needed
+rm(RLN02)
+rm(RLN03)
+rm(RLN04)
+rm(RLN05)
+rm(CCS0025)
+rm(GE0539)
+rm(DLC0087)
+rm(DLC0341)
+rm(GE0287)
+rm(DLC0169)
+rm(CLC00277)
+rm(GE0505)
+rm(CLC00275)
+rm(CCS0099)
+rm(CCS0277)
+rm(CCS2010)
+```
+
+## QC & Sample Filtering
+
+For each sample we want to remove dead or damaged cells that may interfere with our results. To do this we will look at the amount ribosomal and mitochonrial genes per sample and setup cutoff values for these.
+
+Start with mitochondrial genes which are labelled starting with "MT"
+```{r}
+# generate function to calculate percent MT for each sample
+do.MT <- function(obj) {
+  obj[['percent.mt']] <- PercentageFeatureSet(obj, pattern = "^MT");
+  obj
+}
+```
+
+```{r}
+#create list of objects
+seur_obj <- list()
+seur_obj[["RLN02"]] <- RLN02_seur
+seur_obj[["RLN03"]] <- RLN03_seur
+seur_obj[["RLN04"]] <- RLN04_seur
+seur_obj[["RLN05"]] <- RLN05_seur
+seur_obj[["CCS0025"]] <- CCS0025_seur
+seur_obj[["GE0539"]] <- GE0539_seur
+seur_obj[["DLC0087"]] <- DLC0087_seur
+seur_obj[["DLC0341"]] <- DLC0341_seur
+seur_obj[["GE0287"]] <- GE0287_seur
+seur_obj[["DLC0169"]] <- DLC0169_seur
+seur_obj[["CLC00277"]] <- CLC00277_seur
+seur_obj[["GE0505"]] <- GE0505_seur
+seur_obj[["CLC00275"]] <-CLC00275_seur
+seur_obj[["CCS0099"]] <-CCS0099_seur
+seur_obj[["CCS0277"]] <-CCS0277_seur
+seur_obj[["CCS2010"]] <-CCS2010_seur
+
+#run each sample through the mitochondrial function
+seur_obj <- lapply(seur_obj, do.MT)
+```
+
+Now we can do the same thing for ribosomal genes which are denoted by "^RP[SL][[:digit:]]|^RP[[:digit:]]|^RPSA"
+```{r}
+# generate function to calculate percent ribosomes for each sample
+do.RBP <- function(obj) {
+  obj[['percent.rbp']] <- PercentageFeatureSet(obj, pattern = "^RP[SL][[:digit:]]|^RP[[:digit:]]|^RPSA");
+  obj
+}
+
+#run each sample through the Ribosome function
+seur_obj <- lapply(seur_obj, do.RBP)
+```
+
+Now we want to visualize these so we can setup our cutoff values for these
+```{r}
+#generate function to print volcano plot for each seurat object
+do.VlnPlot <- function(obj){
+  print(VlnPlot(obj, features = c("nFeature_RNA","nCount_RNA","percent.mt","percent.rbp"), ncol = 4))}
+
+#run each seurat object through this new function
+lapply(seur_obj, do.VlnPlot)
+```
+
+Based on these graphs we will filter out cells with nfeature count of <500 and filter out cells with a mitochondrial % of >25
+
+```{r}
+do.subset <- function(obj){
+  obj <- subset(obj, subset = nFeature_RNA > 500 & percent.mt < 25)}
+
+seur_obj <- lapply(seur_obj, do.subset)
+```
+
+Merge data together into a combined seurat object:
+```{r}
+#merge list
+combined_seurat <- merge(x= seur_obj[[1]], y = seur_obj[-1])
+```
+
+Apply SCT transform to remove technical variation:
+```{r}
+combined_seurat <- SCTransform(combined_seurat, vars.to.regress = c("percent.mt","percent.rbp"))
+
+#Remove extra datasets to free up space:
+rm(seur_obj)
+rm(RLN02_seur)
+rm(RLN03_seur)
+rm(RLN04_seur)
+rm(RLN05_seur)
+rm(GE0505_seur)
+rm(CLC00277_seur)
+rm(DLC0169_seur)
+rm(GE0287_seur)
+rm(DLC0341_seur)
+rm(DLC0087_seur)
+rm(GE0539_seur)
+rm(CCS0025_seur)
+rm(CLC00275_seur)
+rm(CCS0099_seur)
+rm(CCS0277_seur)
+rm(CCS2010_seur)
+```
+
+## Integration of Datasets using Seurat integration method (v5)
+
+Perform standard PCA and UMAP analysis on un-integrated cells
+```{r}
+set.seed(101)
+combined_seurat <- RunPCA(combined_seurat, npcs = 30, verbose = F)
+combined_seurat <- RunUMAP(combined_seurat, reduction = "pca", dims = 1:12, verbose = F)
+```
+
+Visualize UMAP before integration (Supplementary Figure S3A)
+```{r int17,fig.align="center"}
+DimPlot(combined_seurat,reduction = "umap", cols = c("#BC3C29","#0072B5", "#E18727", "#20854E", "#7876B1", "#4b7284", "#ffc445", "#EE4C97", "#6A6767","#da6857","#7fb8da", "#EAAC6A", "#79B594", "#A8A7CD", "#6F99AD", "#FFDC91", "#f592c0", "#C5C6C7")) + plot_annotation(title = "Before integration")
+
+```
+
+Integrate data:
+```{r}
+combined_seurat <- IntegrateLayers(
+  object = combined_seurat,
+  method = RPCAIntegration,
+  new.reduction = "integrated.rpca",
+  normalization.method = "SCT",
+  verbose = F
+)
+```
+
+```{r}
+# perform UMAP analysis on integrated layer
+set.seed(101)
+combined_seurat <- RunUMAP(combined_seurat, reduction = "integrated.rpca", dims = 1:15, reduction.name = "umap.rpca")
+
+```
+
+Visualize UMAP after integration (Supplementary Figure S3B)
+```{r int17,fig.align="center"}
+DimPlot(combined_seurat, reduction = "umap.rpca", cols = c("#BC3C29","#0072B5", "#E18727", "#20854E", "#7876B1", "#4b7284", "#ffc445", "#EE4C97", "#6A6767","#da6857","#7fb8da", "#EAAC6A", "#79B594", "#A8A7CD", "#6F99AD", "#FFDC91", "#f592c0", "#C5C6C7")) + plot_annotation(title = "After integration")
+```
+
+```{r}
+# rejoin layers
+combined_seurat[["RNA"]] <- JoinLayers(combined_seurat[["RNA"]])
+```
+
+Save integrated and normalized seurat file
+```{r}
+saveRDS(combined_seurat, file = "~/trms_dlbcl/internal_data/combined_seurat.rds")
+#combined_seurat <- readRDS("~/trms_dlbcl/internal_data/combined_seurat.rds")
+```
+
+# Find T cells
+
+Use SingleR package to label immune cells for identification of T cells.
+
+```{r}
+DefaultAssay(combined_seurat) <- "RNA"
+combined_seurat <- NormalizeData(combined_seurat)
+combined_seurat <- FindVariableFeatures(combined_seurat, selection.method = "vst", nfeatures = 3000)
+all.genes <- rownames(combined_seurat)
+combined_seurat <- ScaleData(combined_seurat, features = all.genes)
+```
+
+Generate UMAP with labels:
+```{r}
+
+DimPlot(combined_seurat, cols = c("#BC3C29","#0072B5", "#E18727", "#20854E", "#7876B1", "#4b7284", "#ffc445", "#EE4C97", "#6A6767","#da6857","#7fb8da", "#EAAC6A", "#79B594", "#A8A7CD", "#6F99AD", "#FFDC91", "#f592c0", "#C5C6C7"))
+```
+
+**Labelling with Monaco Immune Data:**
+
+```{r}
+#get reference of Monaco Immune Data
+monaco.ref <- celldex::MonacoImmuneData()
+
+#convert seurat object to sce object
+combined_sce <- as.SingleCellExperiment(DietSeurat(combined_seurat))
+
+#SingleR functions to label cells
+monaco.main <- SingleR(test = combined_sce,assay.type.test = 1,ref = monaco.ref,labels = monaco.ref$label.main)
+```
+
+
+Table of main labels:
+```{r}
+table(monaco.main$pruned.labels)
+```
+
+Add to labels to Seurat object:
+```{r}
+combined_seurat@meta.data$monaco.main <- monaco.main$pruned.labels
+```
+
+Generate UMAP with labels:
+```{r}
+set.seed(123)
+combined_seurat <- SetIdent(combined_seurat, value = "monaco.main")
+
+DimPlot(combined_seurat, label = T , repel = T, label.size = 3) + NoLegend()
+```
+
+**Labelling with Immune Cell Database**
+```{r}
+#get reference
+dice.ref <- celldex::DatabaseImmuneCellExpressionData()
+
+#SingleR functions to label cells
+dice.main <- SingleR(test = combined_sce,assay.type.test = 1,ref = dice.ref,labels = dice.ref$label.main)
+```
+
+Table of main labels:
+```{r}
+table(dice.main$pruned.labels)
+```
+
+Add to labels to Seurat object:
+```{r}
+combined_seurat@meta.data$dice.main <- dice.main$pruned.labels
+```
+
+Generate UMAP with labels: (Supplementary Figure S3C)
+```{r}
+set.seed(123)
+combined_seurat <- SetIdent(combined_seurat, value = "dice.main")
+#Generate UMAP for supplemental Figure 5A
+DimPlot(combined_seurat, label = T , repel = T, label.size = 3) + NoLegend()
+```
+
+Save labelled seurat
+```{r}
+saveRDS(combined_seurat, file = "~/trms_dlbcl/combined_seurat_label.rds")
+```
+
+## Subsetting T cells
+Subset T cell cluster using DICE dataset
+```{r}
+set.seed(123)
+#make sure ident is set to DICE dataset
+combined_seurat <- SetIdent(combined_seurat, value = "dice.main")
+
+#subset cluster of cells labelled as T cells and NK cells
+all.Tcells <- subset(x=combined_seurat, idents = c("T cells, CD8+", "T cells, CD4+", "NK cells"))
+
+```
+
+PCA & Dimensionality Reduction of T/NK cells
+
+```{r}
+DefaultAssay(all.Tcells) <- "SCT"
+all.Tcells <- RunPCA(all.Tcells, verbose = F)
+all.Tcells <- RunUMAP(all.Tcells, dims = 1:20, verbose = F)
+all.Tcells <- FindNeighbors(all.Tcells, dims = 1:20, k.param = 15, verbose = F)
+all.Tcells <- FindClusters(all.Tcells, verbose = F)
+table(all.Tcells[[]]$seurat_clusters)
+
+#view plot
+set.seed(123)
+DimPlot(all.Tcells, label = T)
+```
+
+Remove NK cells by removing cells that are positive for NCAM1
+```{r}
+#first switch active assay to RNA
+DefaultAssay(all.Tcells) <- "RNA"
+
+# create new column in the metadata for Neg/Pos status of NCAM1
+all.Tcells@meta.data$NK <- 'N'
+all.Tcells@meta.data$NK[which(all.Tcells@assays$RNA$counts["NCAM1",]>0.1)] <- 'Y'
+
+#set ident to NK
+all.Tcells <- SetIdent(all.Tcells, value = "NK")
+
+#subst NK cells that are positive for NCAM1
+NK.cells <- subset(x=all.Tcells, idents = "Y")
+
+#subset T cells that are negative for NCAM1
+all.Tcells <- subset(x=all.Tcells, idents = c("N"))
+
+```
+
+## Determing Optimal clusters
+
+Remove TCR genes for better clustering of cell phenotype
+```{r}
+DefaultAssay(all.Tcells) <- "SCT"
+
+all.Tcells <- all.Tcells[!grepl("^TR[ABDG][VJC]", rownames(all.Tcells)), ]
+```
+
+Remove Ribosomal genes for better clustering
+```{r}
+all.Tcells <- all.Tcells[!grepl("^RP[SL][[:digit:]]|^RP[[:digit:]]|^RPSA", rownames(all.Tcells)), ]
+```
+
+Perform PCA and UMAP reduction on all T cells seurat object
+```{r}
+DefaultAssay(all.Tcells) <- "SCT"
+all.Tcells <- RunPCA(all.Tcells, verbose = F)
+all.Tcells <- RunUMAP(all.Tcells, dims = 1:16, verbose = F)
+```
+
+**Determining optimal number of clusters**
+
+First try k-values of 10, 15, 20. 30
+```{r}
+#k=10
+    all.Tcells <- FindNeighbors(all.Tcells, dims = 1:16, k.param = 10)
+    all.Tcells<-FindClusters(all.Tcells, resolution=0.8)
+    all.Tcells@meta.data$SCT_res0.8_k10 <- all.Tcells@meta.data$SCT_snn_res.0.8
+    table(all.Tcells@meta.data$seurat_clusters)
+    
+#k=15
+    all.Tcells <- FindNeighbors(all.Tcells, dims = 1:16, k.param = 15)
+    all.Tcells<-FindClusters(all.Tcells, resolution=0.8)
+    all.Tcells@meta.data$SCT_res0.8_k15 <- all.Tcells@meta.data$SCT_snn_res.0.8
+    table(all.Tcells@meta.data$seurat_clusters)
+#k=20
+    all.Tcells <- FindNeighbors(all.Tcells, dims = 1:16, k.param = 20)
+    all.Tcells<-FindClusters(all.Tcells, resolution=0.8)
+    all.Tcells@meta.data$SCT_res0.8_k20 <- all.Tcells@meta.data$SCT_snn_res.0.8
+    table(all.Tcells@meta.data$seurat_clusters)
+    
+    
+#k=30
+    all.Tcells <- FindNeighbors(all.Tcells, dims = 1:16, k.param = 30)
+    all.Tcells<-FindClusters(all.Tcells, resolution=0.8)
+    all.Tcells@meta.data$SCT_res0.8_k30 <- all.Tcells@meta.data$SCT_snn_res.0.8
+    table(all.Tcells@meta.data$seurat_clusters)
+
+
+```
+
+Calculate Siloutte Index for each k-value
+
+```{r}
+require(cluster)
+clusterings <- grepl("SCT_res0.8",colnames(all.Tcells@meta.data))
+dist.matrix <- dist(x = Embeddings(object = all.Tcells[["pca"]])[, 1:16])
+clusterings <- colnames(all.Tcells@meta.data)[clusterings]
+for (c in clusterings) {
+  require(cluster) # contains silhouette function.
+  sil <- silhouette(as.numeric(as.character(all.Tcells@meta.data[,c])), dist=dist.matrix)
+   print(paste(c))
+  print(mean(sil[,3]))
+  print(head(sil, n=20))
+}
+```
+
+Decided to go ahead with k = 30 so now will try different resolutions to fine tune cluster number
+```{r}
+
+all.Tcells <- FindNeighbors(all.Tcells, dims = 1:16, k.param = 30)
+
+for(res in c(0.2, 0.5, 0.6, 0.8, 1, 1.5)) {
+    all.Tcells<-FindClusters(all.Tcells, resolution=res)
+    print(paste(res))
+    print(table(all.Tcells@meta.data$seurat_clusters))
+}
+
+```
+
+Calculate Siloutte Index for each resolution:
+
+```{r}
+clusterings <- grepl("SCT_snn_res",colnames(all.Tcells@meta.data))
+dist.matrix <- dist(x = Embeddings(object = all.Tcells[["pca"]])[, 1:16])
+clusterings <- colnames(all.Tcells@meta.data)[clusterings]
+for (c in clusterings) {
+  require(cluster) # contains silhouette function.
+  sil <- silhouette(as.numeric(as.character(all.Tcells@meta.data[,c])), dist=dist.matrix)
+   print(paste(c))
+  print(mean(sil[,3]))
+  print(head(sil, n=20))
+}
+```
+
+Calculate Rand Index for each resolution:
+```{r}
+require(igraph)
+
+for (c in clusterings) {
+  for (c2 in clusterings) {
+    ARI <- compare(all.Tcells@meta.data[,c], all.Tcells@meta.data[,c2], method="adjusted.rand")
+    print(paste(c, c2, ARI))
+  }
+}
+
+```
+
+Determine optimal clusters by using number of Marker genes per cluster:
+```{r}
+#prep for find markers
+all.Tcells <- PrepSCTFindMarkers(object = all.Tcells, assay = "SCT", verbose = TRUE)
+for (c in clusterings) {
+  markers <- FindAllMarkers(all.Tcells, group.by=c, logfc.threshold = -Inf, only.pos=TRUE, max.cells.per.ident=100, verbose=FALSE)
+  markers <- markers[ markers[,"p_val_adj"] < 0.05, ]
+  print(paste(c))
+  print(table(markers$cluster))
+}
+
+```
+
+Resolution of 0.8 looks best in terms of marker genes so will go ahead with K = 30 and resolution = 0.8
+
+```{r}
+all.Tcells <- FindNeighbors(all.Tcells, dims = 1:16, k.param = 30)
+all.Tcells<-FindClusters(all.Tcells, resolution=0.8)
+
+# vislualize UMAP of clusters
+DimPlot(all.Tcells, label = T)
+
+#save seurat object of clustered T cells
+saveRDS(all.Tcells, file = "~/trms_dlbcl/all_T_clustered.rds")
+```
+
+## Labelling of other cell types on all cells UMAP
+
+*Label Monocytes/DCs:*
+Subset cells labelled as Monocytes by DICE database
+```{r}
+combined_seurat <- SetIdent(combined_seurat, value = "dice.main")
+M.DC.cells <- subset(x=combined_seurat, idents = "Monocytes")
+
+M.DC.cells@meta.data$cellID <- "Monocytes"
+```
+
+Decipher between monocytes and DCs by using LYZ and LILRA4 genes to determine which cells are DCs
+```{r}
+# create new column in the metadata for Neg/Pos status of gene for DC calls (NCAM1)
+M.DC.cells@meta.data$DC <- 'N'
+M.DC.cells@meta.data$DC[which(M.DC.cells@assays$RNA$counts["LYZ",]>0)] <- 'Y'
+M.DC.cells@meta.data$DC[which(M.DC.cells@assays$RNA$counts["LILRA4",]>0)] <- 'Y'
+
+#make sure ident is set to DC ident
+M.DC.cells <- SetIdent(M.DC.cells, value = "DC")
+
+#subset DCs
+DCs <- subset(x=M.DC.cells, idents = c("Y"))
+
+#create cellID label for DCs
+DCs@meta.data$cellID <- "DC"
+
+#create cellID label for NK cells
+NK.cells@meta.data$cellID <- "NK"
+```
+
+
+*Determining B cell status*
+Add metadata to seurat object so have classification if cell is from rLN or DLBCL patient. 
+```{r}
+#load new metadata
+md <- read.csv("~/trms_dlbcl/internal_data/metadata.csv", stringsAsFactors = FALSE)
+
+#create new df joining md to seurat samples based on original sample ID
+add_data <- left_join(combined_seurat[["orig.ident"]], md)
+
+#covert df to have rownames of cell ids
+row.names(add_data) <- row.names(combined_seurat[[]])
+
+#finally add metadata to seurat object
+combined_seurat <- AddMetaData(combined_seurat, metadata = add_data)
+
+```
+
+Subset B cells:
+
+```{r}
+combined_seurat <- SetIdent(combined_seurat, value = "dice.main")
+
+B.cells <- subset(x=combined_seurat, idents = "B cells")
+```
+
+Cluster B cells
+
+```{r}
+DefaultAssay(B.cells) <- "SCT"
+B.cells <- RunPCA(B.cells, verbose = F)
+B.cells <- RunUMAP(B.cells, dims = 1:30, verbose = F)
+B.cells <- FindNeighbors(B.cells, dims = 1:30, k.param = 20, verbose = F)
+B.cells <- FindClusters(B.cells, verbose = F, resolution=0.8)
+table(B.cells[[]]$seurat_clusters)
+
+#view output of clusters
+set.seed(123)
+DimPlot(B.cells, label = T)
+```
+
+
+Look for IGKC expression per B cell cluster
+```{r}
+B.cells <- SetIdent(B.cells, value= "Control_or_lymphoma")
+DimPlot(B.cells)
+FeaturePlot(B.cells, features = "IGKC")
+B.cells <- SetIdent(B.cells, value= "seurat_clusters")
+VlnPlot(B.cells, features = "IGKC")
+```
+
+Ratio of Control or lymphoma per B cell cluster
+```{r}
+
+dittoBarPlot(B.cells, "Control_or_lymphoma",group.by = "seurat_clusters")
+
+```
+
+Now add a new column of wether each is lymphoma or not as derermined by which clusters are made up of only (or mostly) DLBCL patient cells and have low IGKC expression
+```{r}
+#get number of clusters
+nclusters <- length(unique(B.cells@meta.data$seurat_clusters))
+# Create a vector where the names of the vector are the cluster number
+# and the values of the vector are the annotated names.
+cluster_annotation2 <- rep("unannotated", nclusters)
+names(cluster_annotation2) <- levels(B.cells@meta.data$seurat_clusters)
+cluster_annotation2["0"] = "Malignant"
+cluster_annotation2["1"] = "Malignant"
+cluster_annotation2["2"] = "Normal"
+cluster_annotation2["3"] = "Malignant"
+cluster_annotation2["4"] = "Malignant"
+cluster_annotation2["5"] = "Malignant"
+cluster_annotation2["6"] = "Malignant"
+cluster_annotation2["7"] = "Malignant"
+cluster_annotation2["8"] = "Malignant"
+cluster_annotation2["9"] = "Malignant"
+cluster_annotation2["10"] = "Malignant"
+cluster_annotation2["11"] = "Normal"
+cluster_annotation2["12"] = "Malignant"
+cluster_annotation2["13"] = "Normal"
+cluster_annotation2["14"] = "Malignant"
+cluster_annotation2["15"] = "Malignant"
+cluster_annotation2["16"] = "Normal"
+cluster_annotation2["17"] = "Malignant"
+cluster_annotation2["18"] = "Normal"
+cluster_annotation2["19"] = "Malignant"
+cluster_annotation2["20"] = "Normal"
+cluster_annotation2["21"] = "Malignant"
+cluster_annotation2["22"] = "Normal"
+cluster_annotation2["23"] = "Normal"
+cluster_annotation2["24"] = "Malignant"
+cluster_annotation2["25"] = "Malignant"
+cluster_annotation2["26"] = "Malignant"
+cluster_annotation2["27"] = "Malignant"
+cluster_annotation2["28"] = "Malignant"
+cluster_annotation2["29"] = "Normal"
+cluster_annotation2["30"] = "Normal"
+cluster_annotation2["31"] = "Malignant"
+cluster_annotation2["32"] = "Malignant"
+cluster_annotation2["33"] = "Malignant"
+cluster_annotation2["34"] = "Normal"
+
+B.cells <- SetIdent(B.cells, value=B.cells@meta.data$seurat_clusters)
+B.cells <- RenameIdents(B.cells, cluster_annotation2)
+B.cells@meta.data$cellID <- Idents(B.cells)
+head(B.cells@meta.data)
+```
+
+Check to make sure B cells from rLN samples are not being classified as malignant B cells
+```{r}
+dittoBarPlot(B.cells, "Control_or_lymphoma",group.by = "cellID")
+
+```
+
+Very few rLN B cells were classified as malignant so we are ok with this classification.
+
+*Label T cell phenotypes*
+Now add a new column of general T cell phenotypes determined in internal_TcellAnalysis.rmd
+```{r}
+#get number of clusters
+nclusters <- length(unique(all.Tcells@meta.data$seurat_clusters))
+# Create a vector where the names of the vector are the cluster number
+# and the values of the vector are the annotated names.
+cluster_annotation2 <- rep("unannotated", nclusters)
+names(cluster_annotation2) <- levels(all.Tcells@meta.data$seurat_clusters)
+cluster_annotation2["0"] = "Naive"
+cluster_annotation2["1"] = "Effector"
+cluster_annotation2["2"] = "Tfh"
+cluster_annotation2["3"] = "Memory"
+cluster_annotation2["4"] = "Memory"
+cluster_annotation2["5"] = "Naive"
+cluster_annotation2["6"] = "Effector"
+cluster_annotation2["7"] = "Effector"
+cluster_annotation2["8"] = "Treg"
+cluster_annotation2["9"] = "Effector"
+cluster_annotation2["10"] = "Treg"
+cluster_annotation2["11"] = "Effector"
+cluster_annotation2["12"] = "Tfh"
+cluster_annotation2["13"] = "Memory"
+cluster_annotation2["14"] = "Memory"
+cluster_annotation2["15"] = "Proliferating"
+cluster_annotation2["16"] = "Naive"
+cluster_annotation2["17"] = "IFN-signaling"
+
+all.Tcells <- SetIdent(all.Tcells, value=all.Tcells@meta.data$seurat_clusters)
+all.Tcells <- RenameIdents(all.Tcells, cluster_annotation2)
+all.Tcells@meta.data$cellID <- Idents(all.Tcells)
+head(all.Tcells@meta.data)
+```
+
+Now add new cellID labels to combined_seurat object
+```{r}
+#label all cells as other to start
+combined_seurat$cellID <- "other"
+#add B cells to combined_seurat object
+combined_seurat@meta.data[Cells(B.cells), "cellID"] <-as.character(B.cells$cellID)
+#add Monocytes/DCs to combined_seurat object
+combined_seurat@meta.data[Cells(M.DC.cells), "cellID"] <- M.DC.cells$cellID
+combined_seurat@meta.data[Cells(DCs), "cellID"] <- DCs$cellID
+#add NK to combined_seurat object
+combined_seurat@meta.data[Cells(NK.cells), "cellID"] <- NK.cells$cellID
+#add T cells to combined_seurat object
+combined_seurat@meta.data[Cells(all.Tcells), "cellID"] <- as.character(all.Tcells$cellID)
+
+head(combined_seurat@meta.data)
+```
+
+Generate UMAP with label of if cells came from DLBCL or rLN samples (Supplementary Figure S3D)
+```{r}
+combined_seurat <- SetIdent(combined_seurat, value = "Control_or_lymphoma")
+DimPlot(combined_seurat, cols = c("#6F99AD", "#BC3C29"))
+```
+
+Generate UMAP with new cell labels (Supplementary Fig S3E)
+```{r}
+combined_seurat <- SetIdent(combined_seurat, value = "cellID")
+DimPlot(combined_seurat, label = T)
+```
+
+## Look at expression of factors known to promote TRM cell generation on all cells from TME
+Will look at expression of: 
+* E-cadherin (CDH1) - ligand for CD103
+* TGF-beta (TGFB1) - induces expression of CD103
+* Retinol dehydrogenase 10 (RDH10) and Aldehyde dehydrogenase family members (ALDH1A1, ALDH1A2, ALDH1A3) which is important in synthesis of retonic acid which has been found to play a role in TRM formation
+
+Look at expression of these genes in all cells between RLN vs DLBCL patients (Supplementary Fig. S4C)
+```{r}
+combined_seurat <- SetIdent(combined_seurat, value = "Control_or_lymphoma")
+test_sign = list(c("LBCL", "RLN"))
+
+VlnPlot(object = combined_seurat, features = c('CDH1','TGFB1', 'RDH10', 'ALDH1A1', 'ALDH1A2', 'ALDH1A3'),  cols = c("#6F99AD", "#BC3C29"), pt.size = 0.02, add.noise = F)+ stat_compare_means(comparisons = test_sign, label.y = 3)
+
+```
+
+Look at expression of these genes in different cell types in RLN vs DLBCL patients (Supplementary Fig. S4D)
+```{r}
+combined_seurat <- SetIdent(combined_seurat, value = "cellID")
+
+#order cells
+combined_seurat$cellID <- factor(x = combined_seurat$cellID, levels = c('Malignant', 'Normal', "Monocytes", "DC", "NK", "Treg", "Tfh", "Naive", "Effector", "Memory", "Proliferating", "IFN-signaling", "other"))
+
+#plot
+pdf("~/trms_dlbcl/internal_data/tme_vln.pdf", height = 8, width = 12)
+VlnPlot(object = combined_seurat, features = c('CDH1','TGFB1', 'RDH10', 'ALDH1A1', 'ALDH1A2', 'ALDH1A3'), split.by = "Control_or_lymphoma", cols = c("#BC3C29","#6F99AD"), group.by = "cellID")
+dev.off()
+```

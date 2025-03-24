@@ -1,0 +1,848 @@
+---
+title: "Internal scRNAseq analysis of T cells"
+author: "Gillian Savage"
+date: "1/6/2025"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Seurat)
+library(ggplot2)
+library(patchwork)
+library(reshape2)
+library(RColorBrewer)
+library(dplyr)
+library(dittoSeq)
+library(tidyverse)
+library(ggsci)
+library(ggsignif)
+library(enrichplot)
+library(presto)
+library(lubridate)
+library(pheatmap)
+library(ggpubr)
+library(hues)
+library(igraph)
+library(cluster)
+library(fgsea)
+```
+
+#Load data
+
+Load seurat object of T cells:
+```{r}
+DLBCL_Tcells <- readRDS("~/trms_dlbcl/internal_data/all_T_clustered.rds")
+```
+
+Add metadata to seurat object
+```{r}
+#load metadata
+md <- read.csv("~/trms_dlbcl/internal_data/metadata.csv", stringsAsFactors = FALSE)
+
+#create new df joining md to seurat samples based on original sample ID
+add_data <- left_join(DLBCL_Tcells[["orig.ident"]], md)
+
+#covert df to have rownames of cell ids
+row.names(add_data) <- row.names(DLBCL_Tcells[[]])
+
+#finally add metadata to seurat object
+DLBCL_Tcells <- AddMetaData(DLBCL_Tcells, metadata = add_data)
+
+```
+
+## T cell cluster analysis (related to Figure 2)
+
+All T cell clusters (Figure 2A)
+```{r}
+DimPlot(DLBCL_Tcells, group.by = "seurat_clusters", cols = c("#BC3C29","#0072B5", "#E18727", "#20854E", "#7876B1", "#4b7284", "#ffc445", "#EE4C97", "#6A6767","#da6857","#7fb8da", "#EAAC6A", "#79B594", "#A8A7CD", "#6F99AD", "#FFDC91", "#f592c0", "#C5C6C7"), label = TRUE)
+```
+
+For labeling of T cell clusters we used a custom list of genes related to well known T cell phenotypes and generated a heatmap to visualize expression of these genes (for generation of Figure 2B)
+```{r}
+# make a empty data table
+corrected.cluster.means <- data.table()
+```
+
+```{r}
+
+# seurat_clusters is the column where you store the cluster information
+# this part will calculate the average expression of genes in each cell cluster
+for (i.clust in levels(DLBCL_Tcells@meta.data$seurat_clusters)) {
+	i.clust.means <- data.frame(rowMeans(DLBCL_Tcells[["RNA"]]$data[,which(DLBCL_Tcells@meta.data$seurat_clusters== i.clust)]))
+	colnames(i.clust.means) <- i.clust
+	rownames(i.clust.means) <- rownames(DLBCL_Tcells[["RNA"]]$data)
+	if (nrow(corrected.cluster.means) < 1) {
+		corrected.cluster.means <- i.clust.means
+	}
+	else {
+		corrected.cluster.means <- cbind(corrected.cluster.means, i.clust.means)
+	}
+}
+```
+
+```{r}
+
+# read the markers list
+comp.func.data <- read.delim("~/trms_dlbcl/internal_data/custom_T_sig_fig.txt", stringsAsFactors = FALSE)
+
+comp.func.data$Component <- as.factor(comp.func.data$Component)
+```
+
+```{r}
+# gene annotation 
+comp.func.ann <- comp.func.data[,"Component", drop = FALSE]
+rownames(comp.func.ann) <- comp.func.data$Gene
+# assign colors for the genes
+comp.func.ann.colors <- list(Component = iwanthue(nlevels(comp.func.data$Component)))
+names(comp.func.ann.colors$Component) <- levels(comp.func.data$Component)
+comp.func.rownames <- apply(comp.func.data, 1, function(x) {if (x["Alt_name"] == "") { return(x["Gene"]) } else { return(paste0(x["Gene"], " (", x["Alt_name"], ")")) }})
+
+# gaps in the heatmap
+gaps.row <- which(!duplicated(comp.func.ann$Component))[-1] - 1
+
+# subset the matrix to keep only the markers
+corrected.comp.mat <- as.matrix(corrected.cluster.means[comp.func.data$Gene,])
+
+
+```
+
+Plot heatmap (Figure 2B)
+```{r}
+(pheatmap(corrected.comp.mat, 
+          scale = "row", 
+          cluster_rows = FALSE, 
+          cluster_cols = TRUE, 
+          labels_row = comp.func.rownames,
+					annotation_colors = comp.func.ann.colors, 
+					annotation_row = comp.func.ann, 
+					annotation_names_row = FALSE,
+					gaps_row = gaps.row,
+          color = colorRampPalette(c("navy", "white", "red"))(50)))
+
+```
+
+Overlay of whether T cells came from rLN or lymphoma patient (Figure 2C)
+```{r}
+DimPlot(DLBCL_Tcells, group.by = "Control_or_lymphoma", cols = c("#BC3C29FF","#6F99ADFF"))
+```
+
+# Analysis of CD103+ T cells (related to Figure 2)
+
+The gene for CD103 is ITGAE so first we identified cells that expressed ITGAE using an expression cutoff off value of 0.5
+```{r}
+#first switch active assay to RNA
+DefaultAssay(DLBCL_Tcells) <- "RNA"
+
+#evaluate expression in each cluster
+DLBCL_Tcells <- SetIdent(DLBCL_Tcells, value = "seurat_clusters")
+
+#volcano plot of ITGAE expression across clusters (Figure 2E)
+VlnPlot(object = DLBCL_Tcells, features = 'ITGAE', cols = c("#BC3C29","#0072B5", "#E18727", "#20854E", "#7876B1", "#4b7284", "#ffc445", "#EE4C97", "#6A6767","#da6857","#7fb8da", "#EAAC6A", "#79B594", "#A8A7CD", "#6F99AD", "#FFDC91", "#f592c0", "#C5C6C7"))+ geom_hline(yintercept = 0.5) # add line at 0.5 to evaluate this cutoff value
+```
+
+Expression value cutoff of 0.5 seems appropriate based on violin plot
+Add to seurat column of cells positive for CD103
+```{r}
+# create new column in the metadata for Neg/Pos status of ITGAE/CD103
+DLBCL_Tcells@meta.data$CD103 <- 'Neg'
+DLBCL_Tcells@meta.data$CD103[which(DLBCL_Tcells@assays$RNA$counts["ITGAE",]>0.5)] <- 'Pos'
+```
+
+Plot on UMAP which cells are positive for ITGAE (Fig 2D)
+```{r}
+#Set indent to CD103
+DLBCL_Tcells <- SetIdent(DLBCL_Tcells, value = "CD103")
+
+DimPlot(DLBCL_Tcells, label = F, cols = c("Neg" = "#C5C6C7", "Pos" = "#BC3C29"))
+
+```
+
+Look at proportion of T cells in each patient are positive for ITGAE between rLN and lymphoma patients (Fig 2F)
+```{r}
+dittoFreqPlot(DLBCL_Tcells, "CD103",
+    sample.by = "orig.ident", group.by = "Control_or_lymphoma", vars.use = "Pos",color.panel = c("#DC0000B2", "#7fb8da")) +
+  geom_signif(comparisons = list(c("RLN", "LBCL")),
+              step_increase = 0.2, y_position = 0.45,
+              test = t.test,textsize = 3.5) 
+
+```
+
+Now we will look just at cells positive for ITGAE and recluster/map just these T cells.
+```{r}
+set.seed(123)
+#make sure ident is set to CD103 ident
+DLBCL_Tcells <- SetIdent(DLBCL_Tcells, value = "CD103")
+
+#subset out just T cells positive for ITGAE/CD103
+CD103Tcells <- subset(x=DLBCL_Tcells, idents = c("Pos"))
+
+```
+
+PCA and dimensionality reduction of ITGAE+ cells:
+
+```{r}
+#make sure active assay is SCT
+DefaultAssay(CD103Tcells) <- "SCT"
+
+
+CD103Tcells <- RunPCA(CD103Tcells, verbose = F)
+CD103Tcells <- RunUMAP(CD103Tcells, dims = 1:10, verbose = F)
+CD103Tcells <- FindNeighbors(CD103Tcells, dims = 1:10, k.param = 12, verbose = F)
+CD103Tcells <- FindClusters(CD103Tcells, verbose = F)
+table(CD103Tcells[[]]$seurat_clusters)
+
+#view UMAP with clusters
+set.seed(123)
+DimPlot(CD103Tcells, label = T)
+```
+
+**Determining optimal number of clusters for ITGAE+ T cells**
+
+First try k-values of 10, 15, 20. 30
+```{r}
+#k=10
+    CD103Tcells <- FindNeighbors(CD103Tcells, k.param = 10)
+    CD103Tcells<-FindClusters(CD103Tcells, resolution=0.8)
+    CD103Tcells@meta.data$SCT_res0.8_k10 <- CD103Tcells@meta.data$SCT_snn_res.0.8
+    table(CD103Tcells@meta.data$seurat_clusters)
+    
+#k=15
+    CD103Tcells <- FindNeighbors(CD103Tcells, k.param = 15)
+    CD103Tcells<-FindClusters(CD103Tcells, resolution=0.8)
+    CD103Tcells@meta.data$SCT_res0.8_k15 <- CD103Tcells@meta.data$SCT_snn_res.0.8
+    table(CD103Tcells@meta.data$seurat_clusters)
+
+#k=20
+    CD103Tcells <- FindNeighbors(CD103Tcells, k.param = 20)
+    CD103Tcells<-FindClusters(CD103Tcells, resolution=0.8)
+    CD103Tcells@meta.data$SCT_res0.8_k20 <- CD103Tcells@meta.data$SCT_snn_res.0.8
+    table(CD103Tcells@meta.data$seurat_clusters)
+    
+    
+#k=30
+    CD103Tcells <- FindNeighbors(CD103Tcells, k.param = 30)
+    CD103Tcells<-FindClusters(CD103Tcells, resolution=0.8)
+    CD103Tcells@meta.data$SCT_res0.8_k30 <- CD103Tcells@meta.data$SCT_snn_res.0.8
+    table(CD103Tcells@meta.data$seurat_clusters)
+
+
+```
+
+Calculate Siloutte Index for each k-value
+```{r}
+clusterings <- grepl("SCT_res0.8",colnames(CD103Tcells@meta.data))
+dist.matrix <- dist(x = Embeddings(object = CD103Tcells[["pca"]])[, 1:10])
+clusterings <- colnames(CD103Tcells@meta.data)[clusterings]
+for (c in clusterings) {
+  require(cluster) # contains silhouette function.
+  sil <- silhouette(as.numeric(as.character(CD103Tcells@meta.data[,c])), dist=dist.matrix)
+   print(paste(c))
+  print(mean(sil[,3]))
+  print(head(sil, n=20))
+}
+```
+
+Decided to go ahead with k = 20 so now will try different resolutions to fine tune cluster number
+```{r}
+CD103Tcells <- FindNeighbors(CD103Tcells, k.param = 20, dims = 1:10)
+
+for(res in c(0.2, 0.5, 0.8, 1, 1.5)) {
+    CD103Tcells<-FindClusters(CD103Tcells, resolution=res)
+    print(paste(res))
+    print(table(CD103Tcells@meta.data$seurat_clusters))
+}
+
+```
+
+Calculate Siloutte Index for each resolution:
+```{r}
+clusterings <- grepl("SCT_snn_res",colnames(CD103Tcells@meta.data))
+dist.matrix <- dist(x = Embeddings(object = CD103Tcells[["pca"]])[, 1:15])
+clusterings <- colnames(CD103Tcells@meta.data)[clusterings]
+for (c in clusterings) {
+  require(cluster) # contains silhouette function.
+  sil <- silhouette(as.numeric(as.character(CD103Tcells@meta.data[,c])), dist=dist.matrix)
+   print(paste(c))
+  print(mean(sil[,3]))
+  print(head(sil, n=20))
+}
+```
+
+Calculate Rand Index for each resolution:
+```{r}
+
+for (c in clusterings) {
+  for (c2 in clusterings) {
+    ARI <- compare(CD103Tcells@meta.data[,c], CD103Tcells@meta.data[,c2], method="adjusted.rand")
+    print(paste(c, c2, ARI))
+  }
+}
+
+```
+
+0.5 and 0.8 and 0.2 and 1 look quite close so decided between those using number of marker genes per cluster
+```{r}
+#prep for find markers
+CD103Tcells <- PrepSCTFindMarkers(object = CD103Tcells, assay = "SCT", verbose = TRUE)
+for (c in clusterings) {
+  markers <- FindAllMarkers(CD103Tcells, group.by=c, logfc.threshold = -Inf, only.pos=TRUE, max.cells.per.ident=100, verbose=FALSE)
+  markers <- markers[ markers[,"p_val_adj"] < 0.05, ]
+  print(paste(c))
+  print(table(markers$cluster))
+}
+
+```
+
+Resolution of 0.2 looks best. Re-cluster with k=20 and resolution = 0.2
+```{r}
+CD103Tcells <- FindNeighbors(CD103Tcells, k.param = 20, dims = 1:10, verbose = F)
+CD103Tcells<-FindClusters(CD103Tcells, resolution=0.2)
+
+```
+
+Plot UMAP of ITGAE+ T cell clusters (Fig 2G)
+```{r}
+CD103Tcells <- SetIdent(CD103Tcells, value="seurat_clusters")
+DimPlot(CD103Tcells,label = T, cols = c("#BC3C29","#E18727", "#0072B5", "#EE4C97", "#7876B1", "#6F99AD", "#FFDC91"))
+```
+
+Save just the CD103+ T cells seurat file for downstream analysis
+```{r}
+saveRDS(CD103Tcells, file = "~/trms_dlbcl/seurat_CD103Tcells.rds")
+```
+
+Using Custom T cell markers/signatures based on literature/top genes to make heatmap for Supp fig S6A
+```{r}
+# make a empty data table
+corrected.cluster.means <- data.table()
+```
+
+```{r}
+
+# seurat_clusters is the column where you store the cluster information
+# this part will calculate the average expression of genes in each cell cluster
+for (i.clust in levels(CD103Tcells@meta.data$seurat_clusters)) {
+	i.clust.means <- data.frame(rowMeans(CD103Tcells[["RNA"]]$data[,which(CD103Tcells@meta.data$seurat_clusters== i.clust)]))
+	colnames(i.clust.means) <- i.clust
+	rownames(i.clust.means) <- rownames(CD103Tcells[["RNA"]]$data)
+	if (nrow(corrected.cluster.means) < 1) {
+		corrected.cluster.means <- i.clust.means
+	}
+	else {
+		corrected.cluster.means <- cbind(corrected.cluster.means, i.clust.means)
+	}
+}
+```
+
+```{r}
+# gene annotation 
+comp.func.ann <- comp.func.data[,"Component", drop = FALSE]
+rownames(comp.func.ann) <- comp.func.data$Gene
+# assign colors for the genes
+comp.func.ann.colors <- list(Component = iwanthue(nlevels(comp.func.data$Component)))
+names(comp.func.ann.colors$Component) <- levels(comp.func.data$Component)
+comp.func.rownames <- apply(comp.func.data, 1, function(x) {if (x["Alt_name"] == "") { return(x["Gene"]) } else { return(paste0(x["Gene"], " (", x["Alt_name"], ")")) }})
+
+# gaps in the heatmap
+gaps.row <- which(!duplicated(comp.func.ann$Component))[-1] - 1
+
+# subset the matrix to keep only the markers
+corrected.comp.mat <- as.matrix(corrected.cluster.means[comp.func.data$Gene,])
+
+
+```
+
+Plot heatmap (Supplementary Fig S4A)
+```{r}
+(pheatmap(corrected.comp.mat, 
+          scale = "row", 
+          cluster_rows = FALSE, 
+          cluster_cols = TRUE, 
+          labels_row = comp.func.rownames,
+					annotation_colors = comp.func.ann.colors, 
+					annotation_row = comp.func.ann, 
+					annotation_names_row = FALSE,
+					gaps_row = gaps.row,
+          color = colorRampPalette(c("navy", "white", "red"))(50)))
+
+```
+
+Overlay of rLN or DLBCL samples over UMAP of ITGAE+ T cells (Supplementary Fig S4B)
+```{r}
+DimPlot(CD103Tcells, group.by = "Control_or_lymphoma", cols = c("#BC3C29FF","#6F99ADFF"))
+```
+
+Now add a new column of general T cell phenotypes determined based on expression of genes in heatmap of Supplementary Figure S4A
+```{r}
+#get number of clusters
+nclusters <- length(unique(CD103Tcells@meta.data$seurat_clusters))
+# Create a vector where the names of the vector are the cluster number
+# and the values of the vector are the annotated names.
+cluster_annotation2 <- rep("unannotated", nclusters)
+names(cluster_annotation2) <- levels(CD103Tcells@meta.data$seurat_clusters)
+cluster_annotation2["0"] = "Activated/Effector"
+cluster_annotation2["1"] = "Activated/Effector"
+cluster_annotation2["2"] = "Memory/Naive"
+cluster_annotation2["3"] = "Tfh"
+cluster_annotation2["4"] = "Treg"
+cluster_annotation2["5"] = "Proliferating"
+cluster_annotation2["6"] = "Tfh"
+
+
+CD103Tcells <- SetIdent(CD103Tcells, value=CD103Tcells@meta.data$seurat_clusters)
+CD103Tcells <- RenameIdents(CD103Tcells, cluster_annotation2)
+CD103Tcells@meta.data$cellID <- Idents(CD103Tcells)
+head(CD103Tcells@meta.data)
+```
+
+Create pie chart of clusters (Fig 2G)
+```{r}
+#get number of cells per cluster
+prop <- data.frame(table(CD103Tcells[[]]$cellID))
+
+#create piechart
+ggplot(prop, aes(x="", y=Freq, fill=Var1)) +
+  geom_bar(stat="identity", width=1, color="white") +
+  coord_polar("y", start=0) +
+  theme_void() +
+  labs(fill = "Cluster") +
+  geom_text(aes(label = Freq),
+            position = position_stack(vjust = 0.5)) + scale_fill_manual(values=c("#BC3C29","#0072B5", "#EE4C97", "#7876B1", "#6F99AD", "#FFDC91"))
+```
+
+Look at proportion of ITGAE+ T cells in each cluster between rLN and DLBCL patients (Fig 2H)
+```{r}
+dittoFreqPlot(CD103Tcells, "seurat_clusters",
+   sample.by = "orig.ident", group.by = "Control_or_lymphoma",color.panel = c("#DC0000B2", "#7fb8da"), split.nrow = 1)
+```
+
+*Calculation of enrichment Score of CD103+ T cells in DLBCL vs rLN patients for proliferation, cytotoxicity, exhaustion and activation gene sets*
+Load gene sets:
+```{r}
+#load genes to be used for proliferation scoring
+
+proliferation.genes <- c("ZWINT", "E2F1", "FEN1", "FOXM1", "H2AFZ", "HMGB2", "MCM2", "MCM3", "MCM4", "MCM5", "MCM6", "MKI67", "MYBL2", "PCNA", "CCND1", "AURKA", "BUB1", "TOP2A", "TYMS", "DEK", "CCNB1")
+
+#load genes to be used for cytoxicity scoring
+
+cytotox.genes <- c("KLRF1", "GNLY", "CTSW", "NKG7", "KLRD1", "GZMA", "ADGRG1", "CST7", "KLRK1", "FASLG", "HCST", "KLRB1", "ITGB1", "GZMB", "PRF1")
+
+#load genes to be used for exhaustion scoring
+
+exhaustion.genes <- c("HAVCR2", "LAG3", "TIGIT", "CTLA4", "PDCD1", "LAYN", "BTLA", "CD160")
+
+#load genes to be used for activation scoring
+
+activation.genes <- c("IL26", "IL13", "PARP8", "CD63", "IFNG", "GZMB", "STAT1", "TNF", "HLA-DRA", "HLA-DRB5", "HLA-DRB1")
+
+```
+
+Enrichment score calculations:
+```{r}
+#add score for each cell for proliferation
+CD103Tcells <- AddModuleScore(CD103Tcells,
+                  features = list(proliferation.genes),
+                  name="Prolif.score")
+
+#add score for each cell for cytoxicity
+CD103Tcells <- AddModuleScore(CD103Tcells,
+                  features = list(cytotox.genes),
+                  name="Cytotox.score")
+
+#add score for each cell for exhaustion
+CD103Tcells <- AddModuleScore(CD103Tcells,
+                  features = list(exhaustion.genes),
+                  name="EX.score")
+
+#add score for each cell for activation
+CD103Tcells <- AddModuleScore(CD103Tcells,
+                  features = list(activation.genes),
+                  name="Activation.score")
+
+
+#pull out metatdata
+CD103.df <- data.frame(CD103Tcells@meta.data)
+
+#subset for scores
+CD103.df.scores <- CD103.df[, c("seurat_clusters", "Control_or_lymphoma", "Prolif.score1", "Cytotox.score1", "EX.score1", "Activation.score1")]
+
+head(CD103.df.scores)
+
+```
+
+Generate violin plots of scores (Fig 2I)
+```{r}
+#proliferation
+ggplot(CD103.df.scores,aes(x=Control_or_lymphoma,y=Prolif.score1,fill=Control_or_lymphoma))+geom_violin()+theme_classic()+ggtitle("Proliferation score")+scale_x_discrete("")+
+  theme(title = element_text(face = "plain",size = 12),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        legend.key.size = unit(0.5, 'cm'), #change legend key size
+        aspect.ratio = 1.2,
+        axis.text.x = element_blank(),
+        axis.text.y = element_text(size = 10),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.border = element_blank(),
+        axis.ticks.x = element_blank(),
+        plot.title=element_text(hjust = 0.5))+ scale_fill_manual(values=c("#BC3C29FF","#6F99ADFF"))+
+  geom_boxplot(width=0.2,position=position_dodge(0.9), outlier.colour = "black", fill="white", outlier.size=0.5)+ylim(-0.5, 1.8)+
+  geom_signif(comparisons = list(c("RLN", "LBCL")),
+              step_increase = 0.2,
+              test = wilcox.test,textsize = 3.5, test.args=list(alternative = "two.sided", var.equal = FALSE, paired=FALSE)) 
+
+#cytotoxicity
+ggplot(CD103.df.scores,aes(x=Control_or_lymphoma,y=Cytotox.score1,fill=Control_or_lymphoma))+geom_violin()+theme_classic()+ggtitle("Cytotoxicity score")+scale_x_discrete("")+
+  theme(title = element_text(face = "plain",size = 12),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        legend.key.size = unit(0.5, 'cm'), #change legend key size
+        aspect.ratio = 1.2,
+        axis.text.x = element_blank(),
+        axis.text.y = element_text(size = 10),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.border = element_blank(),
+        axis.ticks.x = element_blank(),
+        plot.title=element_text(hjust = 0.5))+ scale_fill_manual(values=c("#BC3C29FF","#6F99ADFF"))+
+  geom_boxplot(width=0.2,position=position_dodge(0.9), outlier.colour = "black", fill="white", outlier.size=0.5)+ylim(-0.5, 1.8)+
+  geom_signif(comparisons = list(c("RLN", "LBCL")),
+              step_increase = 0.2,
+             # map_signif_level = T,
+              test = wilcox.test,textsize = 3.5, test.args=list(alternative = "two.sided", var.equal = FALSE, paired=FALSE))
+
+#exhaustion
+ggplot(CD103.df.scores,aes(x=Control_or_lymphoma,y=EX.score1,fill=Control_or_lymphoma))+geom_violin()+theme_classic()+ggtitle("Exhaution score")+scale_x_discrete("")+
+  theme(title = element_text(face = "plain",size = 12),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        legend.key.size = unit(0.5, 'cm'), #change legend key size
+        aspect.ratio = 1.2,
+        axis.text.x = element_blank(),
+        axis.text.y = element_text(size = 10),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.border = element_blank(),
+        axis.ticks.x = element_blank(),
+        plot.title=element_text(hjust = 0.5))+ scale_fill_manual(values=c("#BC3C29FF","#6F99ADFF"))+
+  geom_boxplot(width=0.2,position=position_dodge(0.9), outlier.colour = "black", fill="white", outlier.size=0.5)+ylim(-0.5, 1.8) +
+  geom_signif(comparisons = list(c("RLN", "LBCL")),
+              step_increase = 0.2,
+              #map_signif_level = T,
+              test = wilcox.test,textsize = 3.5, test.args=list(alternative = "two.sided", var.equal = FALSE, paired=FALSE))
+
+#activation
+ggplot(CD103.df.scores,aes(x=Control_or_lymphoma,y=Activation.score1,fill=Control_or_lymphoma))+geom_violin()+theme_classic()+ggtitle("Activation score")+scale_x_discrete("")+
+  theme(title = element_text(face = "plain",size = 12),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        legend.key.size = unit(0.5, 'cm'), #change legend key size
+        aspect.ratio = 1.2,
+        axis.text.x = element_blank(),
+        axis.text.y = element_text(size = 10),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.border = element_blank(),
+        axis.ticks.x = element_blank(),
+        plot.title=element_text(hjust = 0.5))+ scale_fill_manual(values=c("#BC3C29FF","#6F99ADFF"))+
+  geom_boxplot(width=0.2,position=position_dodge(0.9), outlier.colour = "black", fill="white", outlier.size=0.5)+ylim(-0.5, 1.8)+
+  geom_signif(comparisons = list(c("RLN", "LBCL")),
+              step_increase = 0.2,
+             # map_signif_level = T,
+              test = wilcox.test,textsize = 3.5,  test.args=list(alternative = "two.sided", var.equal = FALSE, paired=FALSE))
+
+```
+
+
+# Looking for a TRM-like cluster in DLBCL
+
+Look at Trm score within each cluster by enrichment scoring (Fig 3A)
+```{r}
+#load genes associated with Trm sig
+Trm.genes <- c("ITGAE",	"AHR",	"ANXA1",	"CTLA4",	"CXCR6",	"DUSP5",	"EPAS1",	"GZMB",	"IFNG",	"ITGAV",	"KLRC1",	"LMNA",	"RBPJ",	"TNFRSF9",	"XCL1",	"PDCD1",	"DUSP6",	"IL10",	"IL2",	"KCNK5",	"CXCL13",	"ITGA1",	"RGS1", "PRDM1", "RUNX3", "CD69", "DAPK2")
+
+DefaultAssay(DLBCL_Tcells) <- "SCT"
+#add score for each cell for tissue residency
+DLBCL_Tcells <- AddModuleScore(DLBCL_Tcells,
+                  features = list(Trm.genes),
+                  name="Trm.score")
+
+#pull out metatdata
+allT.df <- data.frame(DLBCL_Tcells@meta.data)
+
+#plot on UMAP
+FeaturePlot(DLBCL_Tcells,
+            features = "Trm.score1", label = F, repel = TRUE, alpha = 4) +
+            scale_colour_gradientn(colours = brewer.pal(n = 9, name = "OrRd"))
+```
+
+
+
+Plot gene expression of core TRM associated genes or genes associated with circulation (S1PR1, CCR7, SELL) on UMAP of all T cells (Fig 3B)
+```{r}
+FeaturePlot(DLBCL_Tcells, features = c("ITGAE", "PDCD1", "ENTPD1", "GZMB", "PRDM1", "CD69", "LAG3", "CXCR6", "RUNX3", "S1PR1", "CCR7", "SELL"), cols = c("lightgrey", "navy"))
+```
+
+Generate heatmap of Trm associated genes (Fig 3C)
+```{r}
+# read the markers list
+comp.func.data <- read.delim("~/trms_dlbcl/internal_data/TRM_heatmap.txt", stringsAsFactors = FALSE)
+
+comp.func.data$Component <- as.factor(comp.func.data$Component)
+
+# gene annotation 
+comp.func.ann <- comp.func.data[,"Component", drop = FALSE]
+rownames(comp.func.ann) <- comp.func.data$Gene
+# assign colors for the genes
+comp.func.ann.colors <- list(Component = iwanthue(nlevels(comp.func.data$Component)))
+names(comp.func.ann.colors$Component) <- levels(comp.func.data$Component)
+comp.func.rownames <- apply(comp.func.data, 1, function(x) {if (x["Alt_name"] == "") { return(x["Gene"]) } else { return(paste0(x["Gene"], " (", x["Alt_name"], ")")) }})
+
+# gaps in the heatmap
+gaps.row <- which(!duplicated(comp.func.ann$Component))[-1] - 1
+
+# subset the matrix to keep only the markers
+corrected.comp.mat <- as.matrix(corrected.cluster.means[comp.func.data$Gene,])
+
+(pheatmap(corrected.comp.mat, 
+          scale = "row", 
+          cluster_rows = FALSE, 
+          cluster_cols = TRUE, 
+          labels_row = comp.func.rownames,
+					annotation_colors = comp.func.ann.colors, 
+					annotation_row = comp.func.ann, 
+					annotation_names_row = FALSE,
+					gaps_row = gaps.row,
+          color = colorRampPalette(c("navy", "white", "red"))(50)))
+
+```
+
+Cluster 9 has highest Trm score. Perform gene set enrichment analysis using previously published gene signatures
+
+load custom Trm gene sets:
+```{r}
+#load and read gmt file
+gmt.file <- "~/trms_dlbcl/internal_data/Trm_genesets.gmt"
+Trm.sigs <- gmtPathways(gmt.file)
+str(head(Trm.sigs))
+
+```
+
+First perform wilcox rank sum test to get rank of all genes for each cluster
+```{r}
+#first switch active assay to RNA
+DefaultAssay(DLBCL_Tcells) <- "RNA"
+
+#then wilcox test with presto
+allT.genes <- wilcoxauc(DLBCL_Tcells, 'seurat_clusters')
+
+head(allT.genes)
+
+# we have all the genes for each cluster
+dplyr::count(allT.genes, group)
+```
+
+```{r}
+# select only the feature and auc columns for fgsea, which statistics to use is an open question
+C9.genes<- allT.genes %>%
+  dplyr::filter(group == "9") %>%
+  arrange(desc(auc)) %>% 
+  dplyr::select(feature, auc)
+
+
+ranks_C9<- deframe(C9.genes)
+
+head(ranks_C9)
+```
+
+Perform GSEA for Trm signatures:
+```{r}
+fgseaRes<- fgsea(Trm.sigs, stats = ranks_C9, nperm = 2000)
+
+#tidy up data
+fgseaResTidy <- fgseaRes %>%
+  as_tibble() %>%
+  arrange(desc(NES))
+
+
+fgseaResTidy %>% 
+  dplyr::select(-leadingEdge, -ES, -nMoreExtreme) %>% 
+  arrange(padj) %>% 
+  head()
+```
+
+```{r}
+fgseaRes <- fgseaMultilevel(
+  Trm.sigs,
+  stats = ranks_C9,
+  minSize = 1,
+  maxSize = Inf,
+  eps = 1e-10,
+  scoreType = c("std", "pos", "neg"),
+  nproc = 0,
+  gseaParam = 1,
+  BPPARAM = NULL,
+  nPermSimple = 2000,
+  absEps = NULL
+)
+
+#tidy up data
+fgseaResTidy <- fgseaRes %>%
+  as_tibble() %>%
+  arrange(desc(NES))
+
+
+fgseaResTidy %>% 
+  dplyr::select(-leadingEdge, -ES) %>% 
+  arrange(padj) %>% 
+  head()
+```
+
+Generate lollipop plot of enrichment scores and p-values (Fig 3D)
+```{r}
+#pathways of interest
+paths <- c("Savas_et_al_Trm_UP", "Molodtsov_et_al_LN_Trm",  "Kumar_TRM_coresig","Szabo_CD8_Trm_rest", "Szabo_CD4_Trm_rest", "Szabo_CD4_Trm_act", "Hasen_et_al_Trm_UP", "Milner_et_al_Trm")
+#subset just those pathways
+fgsea.sub <- fgseaResTidy %>% subset(pathway %in% paths)
+
+#order and pathway to factor
+fgsea.sub <- fgsea.sub[order(fgsea.sub$NES, decreasing = F),]
+fgsea.sub$pathway <- factor(fgsea.sub$pathway, levels = c(fgsea.sub$pathway))
+
+# Create the plot:
+ggplot(fgsea.sub, aes(x = pathway, y = NES)) +
+  geom_segment(aes(x = pathway, xend = pathway, y = 0, yend = NES, fill = -log(padj)), lwd = 1) +
+  geom_point(pch = 19, aes(size=size, color = -log(padj))) + scale_color_gradient(low = "blue", high = "red")+
+  theme_bw(base_size=10, base_family = "Helvetica") +
+  theme(axis.text=element_text(size=12, colour = "black"),
+        axis.title=element_text(size=14)) +
+  ggtitle("TRM pathways") +
+  coord_flip()
+
+```
+
+Perform enrichment scoring for proliferation, cytotox, exhaustion, and activation gene sets on T cell clusters that are characterized as activated/effector (clusters 1, 6, 7, 9, 11)
+
+```{r}
+#add score for each cell for proliferation
+DLBCL_Tcells <- AddModuleScore(DLBCL_Tcells,
+                  features = list(proliferation.genes),
+                  name="Prolif.score")
+
+#add score for each cell for cytoxicity
+DLBCL_Tcells <- AddModuleScore(DLBCL_Tcells,
+                  features = list(cytotox.genes),
+                  name="Cytotox.score")
+
+#add score for each cell for exhaustion
+DLBCL_Tcells <- AddModuleScore(DLBCL_Tcells,
+                  features = list(exhaustion.genes),
+                  name="EX.score")
+
+#add score for each cell for activation
+DLBCL_Tcells <- AddModuleScore(DLBCL_Tcells,
+                  features = list(activation.genes),
+                  name="Activation.score")
+
+#pull out metatdata
+all.Tcells.df <- data.frame(DLBCL_Tcells@meta.data)
+
+#subset for scores
+all.Tcells.df.scores <- all.Tcells.df[, c("seurat_clusters", "CD103", "Prolif.score1", "Cytotox.score1", "EX.score1", "Activation.score1")]
+
+head(all.Tcells.df.scores)
+
+```
+
+Subset just effector columns which are clusters 1, 6, 7, 9, 11 to compare these scores between just effector T cell clusters
+```{r}
+eff.Tcell.scores <- all.Tcells.df.scores[all.Tcells.df.scores$seurat_clusters == c('1', "6", "7", "9", "11"),]
+head(eff.Tcell.scores)
+```
+
+Generate violin plots for each score within each cluster (Fig 3E)
+```{r}
+#proliferation
+ggplot(eff.Tcell.scores,aes(x=seurat_clusters,y=Prolif.score1,fill=seurat_clusters))+geom_violin()+theme_classic()+ggtitle("Proliferation score")+scale_x_discrete("")+
+  theme(title = element_text(face = "plain",size = 12),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        legend.key.size = unit(0.5, 'cm'), #change legend key size
+        aspect.ratio = 1.2,
+        axis.text.y = element_text(size = 10),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.border = element_blank(),
+        axis.ticks.x = element_blank(),
+        plot.title=element_text(hjust = 0.5))+ scale_fill_manual(values=c("#0072B5", "#ffc445", "#EE4C97","#da6857","#7fb8da", "#EAAC6A", "#79B594", "#A8A7CD", "#6F99AD", "#FFDC91", "#f592c0", "#C5C6C7"))+
+  geom_boxplot(width=0.2,position=position_dodge(0.9), outlier.colour = "black", fill="white", outlier.size=0.5)+ylim(-0.5, 2.5) + 
+  stat_compare_means(method = "anova", label.y = 2)+        # Add global annova p-value
+  stat_compare_means(label = "p.format", method = "wilcox.test",
+                     ref.group = ".all.", hide.ns = TRUE, size = 3)  
+
+
+#cytotoxicity
+ggplot(eff.Tcell.scores,aes(x=seurat_clusters,y=Cytotox.score1,fill=seurat_clusters))+geom_violin()+theme_classic()+ggtitle("Cytotoxicity score")+scale_x_discrete("")+
+  theme(title = element_text(face = "plain",size = 12),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        legend.key.size = unit(0.5, 'cm'), #change legend key size
+        aspect.ratio = 1.2,
+        axis.text.y = element_text(size = 10),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.border = element_blank(),
+        axis.ticks.x = element_blank(),
+        plot.title=element_text(hjust = 0.5))+ scale_fill_manual(values=c("#BC3C29","#0072B5", "#E18727", "#20854E", "#7876B1", "#4b7284", "#ffc445", "#EE4C97", "#6A6767","#da6857","#7fb8da", "#EAAC6A", "#79B594", "#A8A7CD", "#6F99AD", "#FFDC91", "#f592c0", "#C5C6C7"))+
+  geom_boxplot(width=0.2,position=position_dodge(0.9), outlier.colour = "black", fill="white", outlier.size=0.5)+ylim(-0.5, 2.5)+ 
+  stat_compare_means(method = "anova", label.y = 2)+        # Add global annova p-value
+  stat_compare_means(label = "p.format", method = "wilcox.test",
+                     ref.group = ".all.", hide.ns = TRUE, size = 3)
+
+#exhaustion
+ ggplot(eff.Tcell.scores,aes(x=seurat_clusters,y=EX.score1,fill=seurat_clusters))+geom_violin()+theme_classic()+ggtitle("Exhaustion score")+scale_x_discrete("")+
+  theme(title = element_text(face = "plain",size = 12),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        legend.key.size = unit(0.5, 'cm'), #change legend key size
+        aspect.ratio = 1.2,
+        axis.text.y = element_text(size = 10),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.border = element_blank(),
+        axis.ticks.x = element_blank(),
+        plot.title=element_text(hjust = 0.5))+ scale_fill_manual(values=c("#BC3C29","#0072B5", "#E18727", "#20854E", "#7876B1", "#4b7284", "#ffc445", "#EE4C97", "#6A6767","#da6857","#7fb8da", "#EAAC6A", "#79B594", "#A8A7CD", "#6F99AD", "#FFDC91", "#f592c0", "#C5C6C7"))+
+  geom_boxplot(width=0.2,position=position_dodge(0.9), outlier.colour = "black", fill="white", outlier.size=0.5)+ylim(-0.5, 2.5)+ 
+  stat_compare_means(method = "anova", label.y = 2)+        # Add global annova p-value
+  stat_compare_means(label = "p.format", method = "wilcox.test",
+                     ref.group = ".all.", hide.ns = TRUE, size = 3)
+
+#activation
+ggplot(eff.Tcell.scores,aes(x=seurat_clusters,y=Activation.score1,fill=seurat_clusters))+geom_violin()+theme_classic()+ggtitle("Activation score")+scale_x_discrete("")+
+  theme(title = element_text(face = "plain",size = 12),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        legend.key.size = unit(0.5, 'cm'), #change legend key size
+        aspect.ratio = 1.2,
+        axis.text.y = element_text(size = 10),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.border = element_blank(),
+        axis.ticks.x = element_blank(),
+        plot.title=element_text(hjust = 0.5))+ scale_fill_manual(values=c("#BC3C29","#0072B5", "#E18727", "#20854E", "#7876B1", "#4b7284", "#ffc445", "#EE4C97", "#6A6767","#da6857","#7fb8da", "#EAAC6A", "#79B594", "#A8A7CD", "#6F99AD", "#FFDC91", "#f592c0", "#C5C6C7"))+
+  geom_boxplot(width=0.2,position=position_dodge(0.9), outlier.colour = "black", fill="white", outlier.size=0.5)+ylim(-0.5, 2.5)+ 
+  stat_compare_means(method = "anova", label.y = 2)+        # Add global annova p-value
+  stat_compare_means(label = "p.format", method = "wilcox.test",
+                     ref.group = ".all.", hide.ns = TRUE, size = 3)
+
+```
+
+Graph the proportion of T cells in cluster 9 (TRM cluster) per DLBCL vs rLN patient (Fig 3F)
+```{r}
+dittoFreqPlot(DLBCL_Tcells, "seurat_clusters",
+    sample.by = "orig.ident", group.by = "Control_or_lymphoma", vars.use = "9",color.panel = c("#DC0000B2", "#7fb8da")) +
+  geom_signif(comparisons = list(c("RLN", "LBCL")),
+              step_increase = 0.2, y_position = 0.75,
+              test = t.test,textsize = 3.5) 
+```
