@@ -1,0 +1,364 @@
+---
+title: "External CITEseq dataset analysis"
+author: "Gillian Savage"
+date: "1/7/2025"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Seurat)
+#make sure you are using seurat V4
+#can install Seurat v4 as follows:
+#remotes::install_version("SeuratObject", "4.1.4", repos = c("https://satijalab.r-universe.dev", getOption("repos")))
+#remotes::install_version("Seurat", "4.4.0", repos = c("https://satijalab.r-universe.dev", getOption("repos")))
+library(tidyverse)
+library(RColorBrewer)
+library(ggrepel)
+library(ggpubr)
+library(rstatix)
+library(patchwork)
+library(R.utils)
+library(igraph)
+library(dittoSeq)
+library(ggsci)
+library(hues)
+library(pheatmap)
+
+mutate <- dplyr::mutate
+filter <- dplyr::filter
+count <- dplyr::count
+summarise <- dplyr::summarise
+rename <- dplyr::rename
+select <- dplyr::select
+options(dplyr.summarise.inform=FALSE)
+
+```
+
+
+Counts data was obtained from the European Genome Archive ([EGAD50000000497](https://ega-archive.org/datasets/EGAD50000000497)). Data was processed and integrated using workflow described in Roider T, Baertsch MA, Fitzgerald D, Vöhringer H, Brinkmann BJ, Czernilofsky F, et al. Multimodal and spatially resolved profiling identifies distinct patterns of T cell infiltration in nodal B cell lymphoma entities. Nat Cell Biol. 2024;26:478–89. 
+
+
+# Read in processed data
+```{r}
+Combined_T <- readRDS("~/trms_dlbcl/external_data/Tcells_Integrated.rds") 
+```
+
+# UMAP visualizations
+
+UMAP of clusters
+```{r fig.height=5, fig.width=5.5}
+DimPlot(Combined_T, reduction = 'wnn.umap', label = T, raster = T)+
+  NoLegend()
+```
+
+```{r}
+#remove singeltons
+Combined_T <- subset(Combined_T, idents = c(0:16))
+Combined_T$IdentI <- Idents(Combined_T)
+```
+
+Replot UMAP and color for Figure 5A
+```{r fig.height=5, fig.width=5.5}
+DimPlot(Combined_T, reduction = 'wnn.umap', label = T, cols = c("#BC3C29","#0072B5", "#E18727", "#20854E", "#7876B1", "#4b7284", "#ffc445", "#6A6767","#EE4C97","#da6857","#7fb8da", "#EAAC6A", "#79B594", "#A8A7CD", "#6F99AD", "#FFDC91", "#f592c0", "#C5C6C7"), raster = T)+
+  NoLegend()
+```
+Plot Lymphoma entity for Figure 5B
+```{r}
+Combined_T <- SetIdent(Combined_T, value = "Entity")
+
+DimPlot(Combined_T, reduction = 'wnn.umap', label = F, cols = c("#7876B1", "#E18727", "#20854E", "#0072B5", "#BC3C29"), raster = T)
+
+```
+
+Plot CD103 expression on UMAP as detected by antibody capture (protein expression of CD103) for Figure 5C. Cells positive for CD103 determined by cutoff value of 1.5.
+
+```{r fig.height=5, fig.width=5.5}
+#convert to ADT assay
+DefaultAssay(Combined_T) <- "integratedADT"
+# create new column in the metadata for Neg/Pos status of CD103
+Combined_T@meta.data$CD103 <- 'Neg'
+Combined_T@meta.data$CD103[which(Combined_T@assays$integratedADT@data[".CD103",]>1.5)] <- 'Pos'
+
+#Set indent to CD103
+Combined_T <- SetIdent(Combined_T, value = "CD103")
+
+#generate UMAP showing positive cells (Fig. 6B)
+DimPlot(Combined_T, reduction = 'wnn.umap', label = F, cols = c("Neg" = "grey", "Pos" = "#DC0000B2"))
+```
+
+Graph the proportion of CD103+ T cells per lymphoma entity (Fig. 5G)
+```{r}
+my_comparisons <- list(c("FL", "MCL")) #only one found to be significant
+dittoFreqPlot(Combined_T, "CD103",
+    sample.by = "subject_id", group.by = "Entity", vars.use = "Pos",color.panel = c("#BC3C29","#0072B5", "#E18727", "#20854E", "#7876B1"))+
+# Add pairwise comparisons p-value
+stat_compare_means(comparisons = my_comparisons, label.y = c(0.08, 0.11))
+```
+
+# Identifying a Trm cluster
+
+Look at Trm score within each cluster:
+```{r}
+#switch to RNA assay
+DefaultAssay(Combined_T) <- "RNA"
+#load genes associated with Trm sig
+Trm.genes <- c("ITGAE",	"AHR",	"ANXA1",	"CTLA4",	"CXCR6",	"DUSP5",	"EPAS1",	"GZMB",	"IFNG",	"ITGAV",	"KLRC1",	"LMNA",	"RBPJ",	"TNFRSF9",	"XCL1",	"PDCD1",	"DUSP6",	"IL10",	"IL2",	"KCNK5",	"CXCL13",	"ITGA1",	"RGS1", "PRDM1", "RUNX3", "CD69", "DAPK2")
+
+#add score for each cell for tissue residency
+Combined_T <- AddModuleScore(Combined_T,
+                  features = list(Trm.genes),
+                  name="Trm.score")
+
+#pull out metatdata
+Combined_T.df <- data.frame(Combined_T@meta.data)
+
+```
+
+Plot Trm score per cell on UMAP (Fig. 5D)
+```{r fig.height=5, fig.width=5.5}
+#plot on UMAP
+FeaturePlot(Combined_T,reduction = 'wnn.umap',
+            features = "Trm.score1", label = TRUE, repel = TRUE) +
+            scale_colour_gradientn(colours = brewer.pal(n = 11, name = "YlOrRd"))
+```
+
+Trm Score per cluster (not shown in manuscript)
+```{r}
+ggplot(Combined_T.df,aes(x=IdentI,y=Trm.score1,fill=IdentI))+geom_violin()+theme_classic()+ggtitle("Tissue Residency score")+scale_x_discrete("")+
+  theme(title = element_text(face = "plain",size = 12),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        legend.key.size = unit(0.5, 'cm'), #change legend key size
+        aspect.ratio = 1.2,
+        axis.text.x = element_blank(),
+        axis.text.y = element_text(size = 10),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.border = element_blank(),
+        axis.ticks.x = element_blank(),
+        plot.title=element_text(hjust = 0.5))+
+  geom_boxplot(width=0.2,position=position_dodge(0.9), outlier.colour = "black", fill="white", outlier.size=0.5)+
+  scale_fill_manual(values=c("#BC3C29","#0072B5", "#E18727", "#20854E", "#7876B1", "#4b7284", "#ffc445", "#6A6767","#EE4C97","#da6857","#7fb8da", "#EAAC6A", "#79B594", "#A8A7CD", "#6F99AD", "#FFDC91", "#f592c0", "#C5C6C7"))
+```
+
+Cluster 8 has highest TRM score and also expresses CD103 at the protein level.
+
+To further confirm if cluster 8 is a Trm cell we look at known TRM genes by heatmap.
+```{r}
+# make a empty data table
+corrected.cluster.means <- data.table()
+
+
+# seurat_clusters is the column where you store the cluster information
+# this part will calculate the average expression of genes in each cell cluster
+for (i.clust in levels(Combined_T@meta.data$IdentI)) {
+	i.clust.means <- data.frame(rowMeans(Combined_T[["RNA"]]@data[,which(Combined_T@meta.data$IdentI== i.clust)]))
+	colnames(i.clust.means) <- i.clust
+	rownames(i.clust.means) <- rownames(Combined_T[["RNA"]]@data)
+	if (nrow(corrected.cluster.means) < 1) {
+		corrected.cluster.means <- i.clust.means
+	}
+	else {
+		corrected.cluster.means <- cbind(corrected.cluster.means, i.clust.means)
+	}
+}
+```
+
+
+```{r}
+# read the markers list
+comp.func.data <- read.delim("~/trms_dlbcl/internal_data/TRM_heatmap.txt", stringsAsFactors = FALSE)
+
+comp.func.data$Component <- as.factor(comp.func.data$Component)
+
+# gene annotation 
+comp.func.ann <- comp.func.data[,"Component", drop = FALSE]
+rownames(comp.func.ann) <- comp.func.data$Gene
+# assign colors for the genes
+comp.func.ann.colors <- list(Component = iwanthue(nlevels(comp.func.data$Component)))
+names(comp.func.ann.colors$Component) <- levels(comp.func.data$Component)
+comp.func.rownames <- apply(comp.func.data, 1, function(x) {if (x["Alt_name"] == "") { return(x["Gene"]) } else { return(paste0(x["Gene"], " (", x["Alt_name"], ")")) }})
+
+# gaps in the heatmap
+gaps.row <- which(!duplicated(comp.func.ann$Component))[-1] - 1
+
+# subset the matrix to keep only the markers
+corrected.comp.mat <- as.matrix(corrected.cluster.means[comp.func.data$Gene,])
+
+
+```
+
+Plot heatmap for Figure 5E
+```{r}
+(pheatmap(corrected.comp.mat, 
+          scale = "row", 
+          cluster_rows = FALSE, 
+          cluster_cols = TRUE, 
+          labels_row = comp.func.rownames,
+					annotation_colors = comp.func.ann.colors, 
+					annotation_row = comp.func.ann, 
+					annotation_names_row = FALSE,
+					gaps_row = gaps.row,
+          color = colorRampPalette(c("navy", "white", "red"))(50)))
+
+```
+
+Graph the proportion of each cluster per lymphoma entity (Figure 5H)
+```{r}
+dittoBarPlot(Combined_T, "IdentI",group.by = "Entity", color.panel = c("#BC3C29","#0072B5", "#7fb8da", "#EAAC6A", "#79B594", "#A8A7CD", "#6F99AD", "#FFDC91", "#f592c0", "#E18727", "#20854E", "#7876B1", "#4b7284", "#ffc445", "#6A6767","#EE4C97","#da6857")) 
+
+```
+
+## Analysis of Cluster 8 vs other CD103+ clusters
+
+Cluster 8 had the highest TRM signature score but there were other clusters that expressed CD103 at the protein level - Cluster 7 and Cluster 13. To confirm that cluster 8 is the Trm cluster and explore if cluster 7 and 13 could also be Trm clusters we compared expression of genes and proteins that makes these clusters distinct.
+
+First we compared the proliferation, activation, cytotoxicity, and exhaustion scores of these CD103+ T cell clusters.
+
+```{r}
+#load genes to be used for proliferation scoring
+
+proliferation.genes <- c("ZWINT", "E2F1", "FEN1", "FOXM1", "H2AFZ", "HMGB2", "MCM2", "MCM3", "MCM4", "MCM5", "MCM6", "MKI67", "MYBL2", "PCNA", "CCND1", "AURKA", "BUB1", "TOP2A", "TYMS", "DEK", "CCNB1")
+
+#load genes to be used for cytoxicity scoring
+
+cytotox.genes <- c("KLRF1", "GNLY", "CTSW", "NKG7", "KLRD1", "GZMA", "ADGRG1", "CST7", "KLRK1", "FASLG", "HCST", "KLRB1", "ITGB1", "GZMB", "PRF1")
+
+#load genes to be used for exhaustion scoring
+
+exhaustion.genes <- c("HAVCR2", "LAG3", "TIGIT", "CTLA4", "PDCD1", "LAYN", "BTLA", "CD160")
+
+#load genes to be used for activation scoring
+
+activation.genes <- c("IL26", "IL13", "PARP8", "CD63", "IFNG", "GZMB", "STAT1", "TNF", "HLA-DRA", "HLA-DRB5", "HLA-DRB1")
+
+```
+
+```{r}
+#Separate out CD103+ clusters
+CD103.T <- subset(Combined_T, idents = c("13", "8", "7"))
+DefaultAssay(CD103.T) <- "RNA"
+
+#add score for each cell for proliferation
+CD103.T <- AddModuleScore(CD103.T,
+                  features = list(proliferation.genes),
+                  name="Prolif.score")
+
+#add score for each cell for cytoxicity
+CD103.T <- AddModuleScore(CD103.T,
+                  features = list(cytotox.genes),
+                  name="Cytotox.score")
+
+#add score for each cell for exhaustion
+CD103.T <- AddModuleScore(CD103.T,
+                  features = list(exhaustion.genes),
+                  name="EX.score")
+
+#add score for each cell for activation
+CD103.T <- AddModuleScore(CD103.T,
+                  features = list(activation.genes),
+                  name="Activation.score")
+
+#pull out metatdata
+CD103.T.df <- data.frame(CD103.T@meta.data)
+
+#subset for scores
+CD103.T.df.scores <- CD103.T.df[, c("IdentI", "Prolif.score1", "Cytotox.score1", "EX.score1", "Activation.score1")]
+
+head(CD103.T.df.scores)
+
+```
+
+Plot violin plots of each of these scores between clusters 7, 8 and 13 (Fig. 5F)
+```{r}
+#proliferation
+ggplot(CD103.T.df.scores,aes(x=IdentI,y=Prolif.score1,fill=IdentI))+geom_violin()+theme_classic()+ggtitle("Proliferation score")+scale_x_discrete("")+
+  theme(title = element_text(face = "plain",size = 12),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        legend.key.size = unit(0.5, 'cm'), #change legend key size
+        aspect.ratio = 1.2,
+        axis.text.y = element_text(size = 10),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.border = element_blank(),
+        axis.ticks.x = element_blank(),
+        plot.title=element_text(hjust = 0.5))+ scale_fill_manual(values=c("#6A6767","#EE4C97", "#A8A7CD"))+
+  geom_boxplot(width=0.2,position=position_dodge(0.9), outlier.colour = "black", fill="white", outlier.size=0.5)+ylim(-1, 2.2) + 
+  #stat_compare_means(method = "anova", label.y = 1.5)+        # Add global annova p-value
+  stat_compare_means(label = "p.format", method = "wilcox.test", comparisons = list(c("7", "8"), c("13", "8")),
+                      hide.ns = TRUE, label.y = 1, size = 3)  
+
+#activation
+
+ggplot(CD103.T.df.scores,aes(x=IdentI,y=Activation.score1,fill=IdentI))+geom_violin()+theme_classic()+ggtitle("Activation score")+scale_x_discrete("")+
+  theme(title = element_text(face = "plain",size = 12),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        legend.key.size = unit(0.5, 'cm'), #change legend key size
+        aspect.ratio = 1.2,
+        axis.text.y = element_text(size = 10),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.border = element_blank(),
+        axis.ticks.x = element_blank(),
+        plot.title=element_text(hjust = 0.5))+ scale_fill_manual(values=c("#6A6767","#EE4C97", "#A8A7CD"))+
+  geom_boxplot(width=0.2,position=position_dodge(0.9), outlier.colour = "black", fill="white", outlier.size=0.5)+ylim(-1, 2.2) + 
+  stat_compare_means(method = "anova", label.y = 2)+        # Add global annova p-value
+  stat_compare_means(label = "p.format", method = "wilcox.test", comparisons = list(c("7", "8"), c("13", "8")),
+                      hide.ns = TRUE, label.y = 1, size = 3)  
+
+
+#cytotoxicity
+
+ggplot(CD103.T.df.scores,aes(x=IdentI,y=Cytotox.score1,fill=IdentI))+geom_violin()+theme_classic()+ggtitle("Cytotoxicity score")+scale_x_discrete("")+
+  theme(title = element_text(face = "plain",size = 12),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        legend.key.size = unit(0.5, 'cm'), #change legend key size
+        aspect.ratio = 1.2,
+        axis.text.y = element_text(size = 10),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.border = element_blank(),
+        axis.ticks.x = element_blank(),
+        plot.title=element_text(hjust = 0.5))+ scale_fill_manual(values=c("#6A6767","#EE4C97", "#A8A7CD"))+
+  geom_boxplot(width=0.2,position=position_dodge(0.9), outlier.colour = "black", fill="white", outlier.size=0.5)+ylim(-1, 2.2) + 
+ # stat_compare_means(method = "anova", label.y = 2.2)+        # Add global annova p-value
+  stat_compare_means(label = "p.format", method = "wilcox.test", comparisons = list(c("7", "8"), c("13", "8")),
+                      hide.ns = TRUE, label.y = 2, size = 3)
+
+
+
+#exhaustion
+
+ggplot(CD103.T.df.scores,aes(x=IdentI,y=EX.score1,fill=IdentI))+geom_violin()+theme_classic()+ggtitle("Exhaustion score")+scale_x_discrete("")+
+  theme(title = element_text(face = "plain",size = 12),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        legend.key.size = unit(0.5, 'cm'), #change legend key size
+        aspect.ratio = 1.2,
+        axis.text.y = element_text(size = 10),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.border = element_blank(),
+        axis.ticks.x = element_blank(),
+        plot.title=element_text(hjust = 0.5))+ scale_fill_manual(values=c("#6A6767","#EE4C97", "#A8A7CD"))+
+  geom_boxplot(width=0.2,position=position_dodge(0.9), outlier.colour = "black", fill="white", outlier.size=0.5)+ylim(-1, 2.2) + 
+  #stat_compare_means(method = "anova", label.y = 2)+        # Add global annova p-value
+   stat_compare_means(label = "p.format", method = "wilcox.test", comparisons = list(c("7", "8"), c("13", "8")),
+                      hide.ns = TRUE, label.y = 1.6, size = 3)  
+
+```
+
+Look at differences of genes of interest by violin plot (Supp Fig. S7A)
+```{r}
+VlnPlot(object = CD103.T, features = c('ITGAE', "CXCR6", "PDCD1", "TIGIT", "LAG3", "TOX", "HAVCR2", "GZMB", "GZMA", "PRF1", "IFNG", "CCL3", "CCL4", "CCL5", "SELL", "IL7R", "KLF2", "TCF7", "FOSB"), pt.size = F, cols = c("#6A6767","#EE4C97", "#A8A7CD"))
+```
+
+Look at differences of proteins of interest by violin plot (Supp Fig. S7B)
+```{r}
+DefaultAssay(CD103.T) <- "integratedADT"
+VlnPlot(object = CD103.T, features = c('ITGAE', "CXCR6", "PDCD1", "TIGIT", "LAG3", "TOX", "HAVCR2", "GZMB", "GZMA", "PRF1", "IFNG", "CCL3", "CCL4", "CCL5", "SELL", "IL7R", "KLF2", "TCF7", "FOSB"), pt.size = F, cols = c("#6A6767","#EE4C97", "#A8A7CD"))
+```

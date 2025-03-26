@@ -1,0 +1,1 @@
+Raw scRNAseq data used in this study are available at the European Genome-Phenome Archive (EGA; [https://ega-archive.org/]) under accession ### . The CITEseq data analyzed in this study was obtained from the EGA at [EGAD50000000497](EGAD50000000497)
